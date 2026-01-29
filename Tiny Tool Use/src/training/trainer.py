@@ -180,7 +180,6 @@ class ToolTrainer:
         # Training arguments
         training_args = SFTConfig(
             output_dir=str(self.output_dir),
-            overwrite_output_dir=True,
             num_train_epochs=self.config["training"].get("num_epochs", 3),
             per_device_train_batch_size=self.config["training"].get("batch_size", 4),
             per_device_eval_batch_size=self.config["training"].get("eval_batch_size", 4),
@@ -202,7 +201,6 @@ class ToolTrainer:
             max_grad_norm=1.0,
             optim = "adamw_torch" ,
             max_seq_length=self.config["training"].get("max_length",2048),
-            label_names = ["labels"]
             )
        
 
