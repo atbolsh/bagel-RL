@@ -197,7 +197,7 @@ class ToolTrainer:
             greater_is_better=False,
             report_to="none",
             dataloader_pin_memory=False,
-            fp16=self.config["training"].get("use_lora",True), #turn it to true if using gpu
+            bf16=True,  # Use bf16 (matches BitsAndBytes compute dtype, doesn't need gradient scaling)
             max_grad_norm=1.0,
             optim = "adamw_torch" ,
             max_length=self.config["training"].get("max_length", 2048),
