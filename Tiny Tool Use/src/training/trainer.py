@@ -200,7 +200,6 @@ class ToolTrainer:
             fp16=self.config["training"].get("use_lora",True), #turn it to true if using gpu
             max_grad_norm=1.0,
             optim = "adamw_torch" ,
-            max_seq_length=self.config["training"].get("max_length",2048),
             )
        
 
@@ -213,8 +212,7 @@ class ToolTrainer:
             eval_dataset    = self.eval_dataset,
             args            = training_args,
             processing_class       = self.tokenizer,
-            
-            
+            max_seq_length  = self.config["training"].get("max_length", 2048),
         )
 
     
