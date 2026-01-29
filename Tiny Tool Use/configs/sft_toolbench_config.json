@@ -9,7 +9,7 @@
     "method": "sft",
     "num_epochs": 1,
     "learning_rate": 5e-5,
-    "batch_size": 4,
+    "batch_size": 12,
     "gradient_accumulation_steps": 8,
     "tokenizer_padding_side": "left",
     "warmup_steps": 100,
