@@ -12,19 +12,21 @@ An intentionally-tiny yet production-ready open-source library for fine-tuning L
 ## Quick Start
 
 1. **Setup Environment**:
+
+Create and activate a virtual environment (or conda environment) first, then run the setup script:
 ```bash
+python3 -m venv venv && source venv/bin/activate  # or use conda
 chmod +x setup.sh
 ./setup.sh
-source venv/bin/activate
 ```
 
 2. **Run Basic Training**:
 ```bash
 # Supervised fine-tuning with manual templates
-python train.py --config configs/sft_toolbench_config.json --outdir outputs/toolbench_results
+python train.py --config configs/sft_toolbench_config.json --output-dir outputs/toolbench_results
 
 # DPO training with manual templates
-python train.py --config configs/dpo_config.json --outdir outputs/dpo_results
+python train.py --config configs/dpo_config.json --output-dir outputs/dpo_results
 ```
 
 3. **Merging LORA Adapters**
