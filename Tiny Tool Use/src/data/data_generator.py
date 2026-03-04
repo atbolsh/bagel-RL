@@ -178,6 +178,11 @@ class DataGenerator:
             paraphrases = self._simple_paraphrase(example)
             bootstrapped_data.extend(paraphrases)
         
+        max_samples = self.data_config.get("max_samples", 100)
+        if len(bootstrapped_data) > max_samples:
+            random.shuffle(bootstrapped_data)
+            bootstrapped_data = bootstrapped_data[:max_samples]
+
         logger.info(f"Generated {len(bootstrapped_data)} template-based examples")
         return self._split_dataset(bootstrapped_data)
     
@@ -339,12 +344,15 @@ Assistant: {tool_call}
             ]
         }
         
+        max_samples = self.data_config.get("max_samples", 100)
+        num_tools = max(len(self.tools_config), 1)
+        per_tool = max(max_samples // (num_tools * 4), 1)
+
         for tool in self.tools_config:
             tool_name = tool["name"]
             tool_templates = templates.get(tool_name, [f"Use {tool_name}"])
             
-            # Create 10 canonical examples per tool
-            for i in range(10):
+            for i in range(per_tool):
                 template = random.choice(tool_templates)
                 
                 if tool_name == "calculator":
