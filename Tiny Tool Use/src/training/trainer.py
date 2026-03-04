@@ -253,8 +253,8 @@ class ToolTrainer:
             save_steps=100,
             save_total_limit=3,
             optim=self.config["training"].get("optim", "paged_adamw_8bit"),  # Use 8-bit optimizer
-            bf16=self.config["training"].get("bf16", False),
-            fp16=self.config["training"].get("fp16", True),  # Use mixed precision
+            bf16=self.config["training"].get("bf16", True),
+            fp16=self.config["training"].get("fp16", False),
             max_length=self.config["training"].get("max_length", 512),
             remove_unused_columns=False,
             beta=0.1,  # Lower beta to stabilize training
