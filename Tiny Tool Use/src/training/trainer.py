@@ -322,7 +322,7 @@ class ToolTrainer:
         
         preference_data = []
         
-        for example in self.train_dataset.select(range(min(100, len(self.train_dataset)))):
+        for example in self.train_dataset:
             # Create a "good" and "bad" version
             good_response = example["text"]
             
