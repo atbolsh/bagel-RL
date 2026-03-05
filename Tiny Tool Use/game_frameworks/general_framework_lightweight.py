@@ -1,4 +1,4 @@
-# Lightweight utilities - no full QwenAgentPlayer model loading
+# Lightweight utilities - no full model loading
 # Import this for standalone training without the heavy model overhead
 
 import torch
@@ -39,7 +39,7 @@ img_criterion = nn.MSELoss()
 ########
 
 from transformers import AutoTokenizer
-from datasets import load_dataset
+from datasets import load_dataset as hf_load_dataset
 
 QWEN_MODEL_NAME = "Qwen/Qwen3-0.6B"
 vocab_size = 151936  # Qwen vocab size
@@ -95,14 +95,11 @@ class ProcessBenchDataset(Dataset):
             device = 'cpu'
         self.device = device
         self.seq_length = seq_length
-        
-        # Load ProcessBench dataset
-        self.dataset = load_dataset('Qwen/ProcessBench', split=split)
-        
-        # Pre-tokenize all examples
+
+        self.dataset = hf_load_dataset('Qwen/ProcessBench', split=split)
+
         self.examples = []
         for item in self.dataset:
-            # ProcessBench has various fields - we'll use the main text content
             if 'problem' in item:
                 text = item['problem']
             elif 'question' in item:
@@ -111,7 +108,7 @@ class ProcessBenchDataset(Dataset):
                 text = item['text']
             else:
                 text = str(item)
-            
+
             encoded = tokenizer(
                 text,
                 padding='max_length',
@@ -120,44 +117,48 @@ class ProcessBenchDataset(Dataset):
                 return_tensors='pt'
             )
             self.examples.append(encoded['input_ids'].squeeze(0))
-    
+
     def __len__(self):
         return len(self.examples)
-    
+
     def __getitem__(self, i):
         return self.examples[i].to(self.device)
 
 
-class SampleDataset(Dataset):
-    """Legacy dataset for local text files, updated for Qwen tokenizer."""
-    def __init__(self, seq_length=MAX_SEQ_LENGTH, evaluate=False, device=None):
+class FineWebEduDataset(Dataset):
+    """Control text dataset backed by HuggingFaceFW/fineweb-edu (streamed)."""
+    def __init__(self, max_samples=5000, seq_length=MAX_SEQ_LENGTH, device=None):
         if device is None:
             device = 'cpu'
         self.device = device
         self.seq_length = seq_length
-        
+
+        ds = hf_load_dataset(
+            "HuggingFaceFW/fineweb-edu", "default",
+            split="train", streaming=True,
+        )
+
         self.examples = []
-        
-        # Look for data in parent directory
-        data_path = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "text_pretraining_data"
-        src_files = data_path.glob("*-eval.txt") if evaluate else data_path.glob("*-train.txt")
-        for src_file in src_files:
-            print("🔥", src_file)
-            lines = src_file.read_text(encoding="utf-8").splitlines()
-            for line in lines:
-                if line.strip():
-                    encoded = tokenizer(
-                        line,
-                        padding='max_length',
-                        truncation=True,
-                        max_length=self.seq_length,
-                        return_tensors='pt'
-                    )
-                    self.examples.append(encoded['input_ids'].squeeze(0))
-    
+        for i, item in enumerate(ds):
+            if i >= max_samples:
+                break
+            text = item.get("text", "")
+            if not text.strip():
+                continue
+            encoded = tokenizer(
+                text,
+                padding='max_length',
+                truncation=True,
+                max_length=self.seq_length,
+                return_tensors='pt'
+            )
+            self.examples.append(encoded['input_ids'].squeeze(0))
+
+        print(f"FineWebEduDataset: loaded {len(self.examples)} examples")
+
     def __len__(self):
         return len(self.examples)
-    
+
     def __getitem__(self, i):
         return self.examples[i].to(self.device)
 
@@ -165,22 +166,25 @@ class SampleDataset(Dataset):
 def load_text_datasets():
     """Load the default text datasets. Returns (train_dataset, val_dataset)."""
     try:
-        sdt = ProcessBenchDataset(split='gsm8k', device='cpu')
-        sdv = ProcessBenchDataset(split='gsm8k', device='cpu')
-        print(f"Loaded ProcessBench dataset with {len(sdt)} examples")
+        sdt = FineWebEduDataset(max_samples=5000, device='cpu')
+        sdv = FineWebEduDataset(max_samples=500, device='cpu')
         return sdt, sdv
     except Exception as e:
-        print(f"Warning: Could not load ProcessBench dataset: {e}")
-        print("Falling back to local SampleDataset")
-        sdt = SampleDataset()
-        sdv = SampleDataset(evaluate=True)
-        return sdt, sdv
+        print(f"Warning: Could not load FineWeb-Edu dataset: {e}")
+        print("Falling back to ProcessBench")
+        try:
+            sdt = ProcessBenchDataset(split='gsm8k', device='cpu')
+            sdv = ProcessBenchDataset(split='gsm8k', device='cpu')
+            return sdt, sdv
+        except Exception as e2:
+            print(f"Warning: Could not load ProcessBench either: {e2}")
+            raise
 
 
 def get_text_batch(dataset, ind, batch_size, target_device=None):
     """
     Get a batch of text tensors from a dataset.
-    
+
     Dataset slicing (dataset[a:b]) returns a list, not a tensor.
     This function stacks the items into a proper tensor.
     """
@@ -195,7 +199,7 @@ def get_text_batch(dataset, ind, batch_size, target_device=None):
 def get_settings_batch(batch_size, bare=True, restrict_angles=True, max_agent_offset=2.0):
     """
     Generate a batch of game settings.
-    
+
     Args:
         batch_size: Number of settings to generate
         bare: If True, use bare settings (no extra walls, 1 gold)
@@ -212,7 +216,7 @@ def get_settings_batch(batch_size, bare=True, restrict_angles=True, max_agent_of
 def get_images(settings_batch=None, device=device, ignore_agent=False, ignore_gold=False, ignore_walls=False, batch_size=None, bare=True, restrict_angles=True, dtype=torch.float32):
     """
     Get game images as tensors.
-    
+
     Args:
         settings_batch: List of game settings (or None to generate)
         device: Target device
@@ -220,16 +224,15 @@ def get_images(settings_batch=None, device=device, ignore_agent=False, ignore_go
         batch_size: Number of images to generate (if settings_batch is None)
         bare, restrict_angles: Generation options (if settings_batch is None)
         dtype: Output dtype (default: torch.float32 for consistency with model)
-        
+
     Returns:
         Tensor of shape (batch_size, 3, 224, 224) in specified dtype
     """
-    # If no settings provided, generate them using bare/restrict_angles flags
     if settings_batch is None:
         if batch_size is None:
             raise ValueError("Must provide either settings_batch or batch_size")
         settings_batch = get_settings_batch(batch_size, bare=bare, restrict_angles=restrict_angles)
-    
+
     batch_size = len(settings_batch)
     img = torch.zeros(batch_size, 224, 224, 3, dtype=dtype)
     should_draw = (ignore_agent or ignore_gold or ignore_walls)

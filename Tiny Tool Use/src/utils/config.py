@@ -12,8 +12,8 @@ class ConfigManager:
     def __init__(self, config_path: str):
         self.config_path = Path(config_path)
         self.config = self._load_config()
-        # do not run the configuration validation for toolbench
-        if not self.config["data"]["strategy"].lower()=="toolbench":
+        skip_validation = self.config["data"]["strategy"].lower() in ("toolbench", "position_qa")
+        if not skip_validation:
             self._validate_config()
     
     def _load_config(self) -> Dict[str, Any]:
@@ -54,7 +54,7 @@ class ConfigManager:
                     "type": "object",
                     "required": ["strategy"],
                     "properties": {
-                        "strategy": {"enum": ["toolbench", "teacher_mode", "manual_templates"]},
+                        "strategy": {"enum": ["toolbench", "teacher_mode", "manual_templates", "position_qa"]},
                         "max_samples": {"type": "integer", "minimum": 1},
                         "train_split": {"type": "number", "minimum": 0, "maximum": 1}
                     }

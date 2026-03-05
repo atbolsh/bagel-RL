@@ -21,12 +21,16 @@ class DataGenerator:
     def __init__(self, data_config: Dict[str, Any], tools_config: List[Dict[str, Any]], tokenizer_config: List[Dict[str, Any]]):
         self.data_config = data_config
         self.tools_config = tools_config
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_config["name"], trust_remote_code=tokenizer_config['trust_remote_code'])
-        
-       
-        self.tool_executor = ToolExecutor(tools_config)
         self.strategy = data_config["strategy"]
-        self.generation_type = data_config["generation_type"]
+        self.generation_type = data_config.get("generation_type", "online")
+
+        if self.strategy == "position_qa":
+            self.tokenizer = None
+            self.tool_executor = None
+            return
+
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_config["name"], trust_remote_code=tokenizer_config['trust_remote_code'])
+        self.tool_executor = ToolExecutor(tools_config)
 
         
     def prepare_datasets(self) -> Tuple[Dataset, Dataset]:
@@ -39,8 +43,19 @@ class DataGenerator:
             return self._prepare_teacher_mode_data()
         elif self.strategy == "manual_templates" and self.generation_type.lower()=='synthetic':
             return self._prepare_manual_template_data()
+        elif self.strategy == "position_qa":
+            return self._prepare_position_qa_placeholder()
         else:
             raise ValueError(f"Unknown data strategy: {self.strategy}. Data generation strategy {self.generation_type} is not implemented for {self.strategy} ")
+
+    def _prepare_position_qa_placeholder(self) -> Tuple[Dataset, Dataset]:
+        """Return tiny placeholder datasets for position_qa.
+
+        Actual data generation happens online inside the VLM DPO trainer,
+        so these are just empty shells to satisfy the train.py pipeline.
+        """
+        placeholder = Dataset.from_list([{"text": "placeholder"}])
+        return placeholder, placeholder
     
 
     def _download_from_google_drive(self, folder_url, destination_dir):
