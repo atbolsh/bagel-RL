@@ -9,6 +9,9 @@ import json
 import logging
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import torch
 from rich.console import Console
 

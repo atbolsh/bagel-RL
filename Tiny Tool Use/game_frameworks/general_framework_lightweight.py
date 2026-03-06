@@ -1,6 +1,9 @@
 # Lightweight utilities - no full model loading
 # Import this for standalone training without the heavy model overhead
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import torch
 import torch.nn as nn
 import os

@@ -7,6 +7,9 @@ import argparse
 import json
 import logging
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from src.utils.evaluation import ToolUseEvaluator, create_test_cases
 from src.utils.config import ConfigManager
 from src.utils.logging_utils import setup_logging

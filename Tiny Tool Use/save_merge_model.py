@@ -2,6 +2,10 @@ import os
 import argparse
 import torch
 from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv()
+
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
