@@ -9,9 +9,13 @@ import torch.nn.functional as F
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
-    AutoModelForVision2Seq,
     AutoProcessor,
 )
+
+try:
+    from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
+except ImportError:
+    from transformers import AutoModelForVision2Seq
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model, TaskType
 from trl import DPOTrainer, SFTTrainer
