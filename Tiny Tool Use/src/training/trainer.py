@@ -1,6 +1,7 @@
 """Training module for tool use models."""
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 import logging
+import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -10,6 +11,7 @@ from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
     AutoProcessor,
+    TrainerCallback,
 )
 
 try:
@@ -28,6 +30,43 @@ from ..tools.executor import ToolExecutor
 
 
 logger = logging.getLogger(__name__)
+
+
+class LogarithmicSaveCallback(TrainerCallback):
+    """HF Trainer callback that implements logarithmic checkpoint saving.
+
+    When attached to a Trainer whose built-in ``save_strategy`` has been set
+    to ``"no"``, this callback takes over checkpointing entirely, using the
+    same logarithmic schedule as ``ToolTrainer._logarithmic_save_decision``.
+    """
+
+    def __init__(self, output_dir):
+        self.output_dir = Path(output_dir)
+        self._last_temp_ckpt = None
+        self._current_is_permanent = True
+
+    def on_step_end(self, args, state, control, **kwargs):
+        step = state.global_step
+        should_save, is_permanent = ToolTrainer._logarithmic_save_decision(step)
+        if should_save:
+            control.should_save = True
+            self._current_is_permanent = is_permanent
+        return control
+
+    def on_save(self, args, state, control, **kwargs):
+        step = state.global_step
+        ckpt_dir = self.output_dir / f"checkpoint-{step}"
+        tag = "permanent" if self._current_is_permanent else "temporary"
+        logger.info(f"Logarithmic checkpoint at step {step} ({tag})")
+
+        if self._last_temp_ckpt is not None and self._last_temp_ckpt.exists():
+            shutil.rmtree(self._last_temp_ckpt)
+            logger.info(f"Deleted rolling checkpoint {self._last_temp_ckpt}")
+
+        self._last_temp_ckpt = (
+            None if self._current_is_permanent else ckpt_dir
+        )
+        return control
 
 
 class ToolTrainer:
@@ -189,9 +228,11 @@ class ToolTrainer:
     def _train_sft(self, resume_from_checkpoint: Optional[str] = None):
         """Supervised fine-tuning."""
         logger.info("Starting supervised fine-tuning...")
-        
-        
-        # Training arguments
+
+        use_log_save = (
+            self.config["training"].get("save_strategy") == "logarithmic"
+        )
+
         training_args = SFTConfig(
             output_dir=str(self.output_dir),
             num_train_epochs=self.config["training"].get("num_epochs", 3),
@@ -203,36 +244,33 @@ class ToolTrainer:
             logging_steps=10,
             eval_strategy="steps",
             eval_steps=100,
-            save_strategy="steps",
+            save_strategy="no" if use_log_save else "steps",
             save_steps=500,
-            save_total_limit=3,
-            load_best_model_at_end=True,
+            save_total_limit=None if use_log_save else 3,
+            load_best_model_at_end=not use_log_save,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
             report_to="none",
             dataloader_pin_memory=False,
-            bf16=True,  # Use bf16 (matches BitsAndBytes compute dtype, doesn't need gradient scaling)
+            bf16=True,
             max_grad_norm=1.0,
-            optim = "adamw_torch" ,
+            optim="adamw_torch",
             max_length=self.config["training"].get("max_length", 2048),
-            )
-       
-
-        
-        
-        
-        trainer = SFTTrainer(
-            model           = self.model,
-            train_dataset   = self.train_dataset,
-            eval_dataset    = self.eval_dataset,
-            args            = training_args,
-            processing_class       = self.tokenizer,
         )
 
-    
-       
-        
-        # Train
+        callbacks = []
+        if use_log_save:
+            callbacks.append(LogarithmicSaveCallback(self.output_dir))
+
+        trainer = SFTTrainer(
+            model=self.model,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.eval_dataset,
+            args=training_args,
+            processing_class=self.tokenizer,
+            callbacks=callbacks,
+        )
+
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         
         # Save final model
@@ -242,54 +280,56 @@ class ToolTrainer:
     def _train_dpo(self, resume_from_checkpoint: Optional[str] = None):
         """Train the model using DPO."""
         logger.info("Starting DPO training")
-        
-        # Make sure we're using LoRA or the training will likely fail
+
         use_lora = self.config["training"].get("use_lora", True)
+        use_log_save = (
+            self.config["training"].get("save_strategy") == "logarithmic"
+        )
 
         preference_dataset = self._create_preference_dataset()
-        
+
         if not use_lora:
             logger.warning(
-                "⚠️ You're attempting to run DPO without LoRA which may cause NaN values. "
+                "You're attempting to run DPO without LoRA which may cause NaN values. "
                 "Consider enabling LoRA with 'use_lora': true in your config."
             )
-        
-        # Setup training arguments with gradient clipping
+
         training_args = DPOConfig(
             output_dir=str(self.output_dir),
             num_train_epochs=self.config["training"].get("num_epochs", 3),
             per_device_train_batch_size=self.config["training"].get("batch_size", 4),
             gradient_accumulation_steps=self.config["training"].get("gradient_accumulation_steps", 1),
             learning_rate=self.config["training"].get("learning_rate", 5e-6),
-            max_grad_norm=self.config["training"].get("max_grad_norm", 0.3),  # Add strict gradient clipping
+            max_grad_norm=self.config["training"].get("max_grad_norm", 0.3),
             logging_steps=10,
-            save_strategy="steps",
+            save_strategy="no" if use_log_save else "steps",
             save_steps=100,
-            save_total_limit=3,
-            optim=self.config["training"].get("optim", "paged_adamw_8bit"),  # Use 8-bit optimizer
+            save_total_limit=None if use_log_save else 3,
+            optim=self.config["training"].get("optim", "paged_adamw_8bit"),
             bf16=self.config["training"].get("bf16", True),
             fp16=self.config["training"].get("fp16", False),
             max_length=self.config["training"].get("max_length", 512),
             remove_unused_columns=False,
-            beta=0.1,  # Lower beta to stabilize training
+            beta=0.1,
             report_to="none",
         )
-        
-      
-        # Create DPO trainer with improved stability
+
+        callbacks = []
+        if use_log_save:
+            callbacks.append(LogarithmicSaveCallback(self.output_dir))
+
         trainer = DPOTrainer(
             model=self.model,
-            ref_model=None,  # Use same model as reference
+            ref_model=None,
             args=training_args,
             train_dataset=preference_dataset,
             processing_class=self.tokenizer,
+            callbacks=callbacks,
         )
-        
-        # Add gradient checkpointing for memory efficiency
+
         if hasattr(self.model, "gradient_checkpointing_enable"):
             self.model.gradient_checkpointing_enable()
-        
-        # Train
+
         logger.info("Starting DPO training")
         trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         
@@ -351,6 +391,39 @@ class ToolTrainer:
         
         return Dataset.from_list(preference_data)
     
+    # ------------------------------------------------------------------ #
+    # Logarithmic checkpoint strategy
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _logarithmic_save_decision(step: int):
+        """Determine whether *step* should be checkpointed and if so whether
+        the checkpoint is permanent or temporary (rolling).
+
+        Returns ``(should_save, is_permanent)``.
+
+        Permanent saves happen at "round" numbers: 100, 200, …, 900,
+        1000, 2000, …, 9000, 10000, 20000, …, 90000, etc.
+
+        Starting from decade 4 (10 000+), rolling temporary saves are
+        placed at the next-finer granularity between permanents.  Only the
+        most recent temporary is kept; the previous one is deleted.
+        """
+        if step < 100:
+            return False, False
+
+        import math
+        d = int(math.log10(step))          # decade exponent
+        magnitude = 10 ** d
+
+        if step % magnitude == 0:
+            return True, True              # permanent
+
+        if d >= 4 and step % (magnitude // 10) == 0:
+            return True, False             # temporary (rolling)
+
+        return False, False
+
     # ------------------------------------------------------------------ #
     # VLM loading
     # ------------------------------------------------------------------ #
@@ -518,6 +591,7 @@ class ToolTrainer:
         lr = tc.get("learning_rate", 1e-6)
         logging_steps = tc.get("logging_steps", 10)
         save_steps = tc.get("save_steps", 500)
+        save_strategy = tc.get("save_strategy", "steps")
         max_grad_norm = tc.get("max_grad_norm", 0.3)
         warmup_steps = tc.get("warmup_steps", 100)
 
@@ -557,8 +631,11 @@ class ToolTrainer:
 
         logger.info(
             f"Starting VLM DPO training: {max_steps} steps, "
-            f"batch_size={batch_size}, grad_accum={grad_accum}, beta={beta}"
+            f"batch_size={batch_size}, grad_accum={grad_accum}, beta={beta}, "
+            f"save_strategy={save_strategy}"
         )
+
+        _last_temp_ckpt = None  # tracks the rolling temporary checkpoint
 
         for step in range(max_steps):
             # ---- generate data ----
@@ -627,12 +704,25 @@ class ToolTrainer:
                     self.writer.add_scalar("dpo/accuracy", accuracy, step + 1)
 
             # ---- checkpointing ----
-            if (step + 1) % save_steps == 0:
+            if save_strategy == "logarithmic":
+                should_save, is_permanent = self._logarithmic_save_decision(step + 1)
+            else:
+                should_save = (step + 1) % save_steps == 0
+                is_permanent = True
+
+            if should_save:
                 ckpt_dir = self.output_dir / f"checkpoint-{step+1}"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
                 self.model.save_pretrained(ckpt_dir)
                 self.processor.save_pretrained(ckpt_dir)
-                logger.info(f"Checkpoint saved to {ckpt_dir}")
+                tag = "permanent" if is_permanent else "temporary"
+                logger.info(f"Checkpoint saved to {ckpt_dir} ({tag})")
+
+                if _last_temp_ckpt is not None and _last_temp_ckpt.exists():
+                    shutil.rmtree(_last_temp_ckpt)
+                    logger.info(f"Deleted rolling checkpoint {_last_temp_ckpt}")
+
+                _last_temp_ckpt = None if is_permanent else ckpt_dir
 
         # ---- save final model ----
         final_dir = self.output_dir / "final_model"
