@@ -1,5 +1,6 @@
 """Training module for tool use models."""
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -66,6 +67,38 @@ class LogarithmicSaveCallback(TrainerCallback):
         self._last_temp_ckpt = (
             None if self._current_is_permanent else ckpt_dir
         )
+        return control
+
+
+class LearningTraceCallback(TrainerCallback):
+    """Writes training metrics to learning_trace.jsonl for plotting learning curves."""
+
+    def __init__(self, output_dir):
+        self.trace_path = Path(output_dir) / "learning_trace.jsonl"
+        self._file = None
+
+    def _ensure_file(self):
+        if self._file is None:
+            self._file = open(self.trace_path, "a")
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is None:
+            return control
+        self._ensure_file()
+        row = {"step": state.global_step}
+        for k, v in logs.items():
+            try:
+                row[k] = float(v)
+            except (TypeError, ValueError):
+                row[k] = v if isinstance(v, (int, str, bool)) else str(v)
+        self._file.write(json.dumps(row) + "\n")
+        self._file.flush()
+        return control
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if self._file is not None:
+            self._file.close()
+            self._file = None
         return control
 
 
@@ -258,7 +291,7 @@ class ToolTrainer:
             max_length=self.config["training"].get("max_length", 2048),
         )
 
-        callbacks = []
+        callbacks = [LearningTraceCallback(self.output_dir)]
         if use_log_save:
             callbacks.append(LogarithmicSaveCallback(self.output_dir))
 
@@ -314,7 +347,7 @@ class ToolTrainer:
             report_to="none",
         )
 
-        callbacks = []
+        callbacks = [LearningTraceCallback(self.output_dir)]
         if use_log_save:
             callbacks.append(LogarithmicSaveCallback(self.output_dir))
 
@@ -635,101 +668,115 @@ class ToolTrainer:
             f"save_strategy={save_strategy}"
         )
 
+        trace_path = self.output_dir / "learning_trace.jsonl"
+        trace_file = open(trace_path, "a")
         _last_temp_ckpt = None  # tracks the rolling temporary checkpoint
 
-        for step in range(max_steps):
-            # ---- generate data ----
-            samples = generator.generate_batch(batch_size)
-            chosen_inputs, rejected_inputs, prompt_lengths = (
-                self._process_dpo_vlm_samples(samples)
-            )
+        try:
+            for step in range(max_steps):
+                # ---- generate data ----
+                samples = generator.generate_batch(batch_size)
+                chosen_inputs, rejected_inputs, prompt_lengths = (
+                    self._process_dpo_vlm_samples(samples)
+                )
 
-            # Extract pixel-related kwargs (pixel_values, image_grid_thw, etc.)
-            chosen_extra = {
-                k: v for k, v in chosen_inputs.items()
-                if k not in ("input_ids", "attention_mask")
-            }
-            rejected_extra = {
-                k: v for k, v in rejected_inputs.items()
-                if k not in ("input_ids", "attention_mask")
-            }
+                # Extract pixel-related kwargs (pixel_values, image_grid_thw, etc.)
+                chosen_extra = {
+                    k: v for k, v in chosen_inputs.items()
+                    if k not in ("input_ids", "attention_mask")
+                }
+                rejected_extra = {
+                    k: v for k, v in rejected_inputs.items()
+                    if k not in ("input_ids", "attention_mask")
+                }
 
-            # ---- policy log-probs (with gradients) ----
-            chosen_logps = self._compute_vlm_response_logps(
-                chosen_inputs.input_ids, chosen_inputs.attention_mask,
-                prompt_lengths, **chosen_extra,
-            )
-            rejected_logps = self._compute_vlm_response_logps(
-                rejected_inputs.input_ids, rejected_inputs.attention_mask,
-                prompt_lengths, **rejected_extra,
-            )
-
-            # ---- reference log-probs (LoRA off, no grad) ----
-            with torch.no_grad():
-                self.model.disable_adapter_layers()
-                ref_chosen_logps = self._compute_vlm_response_logps(
+                # ---- policy log-probs (with gradients) ----
+                chosen_logps = self._compute_vlm_response_logps(
                     chosen_inputs.input_ids, chosen_inputs.attention_mask,
                     prompt_lengths, **chosen_extra,
                 )
-                ref_rejected_logps = self._compute_vlm_response_logps(
+                rejected_logps = self._compute_vlm_response_logps(
                     rejected_inputs.input_ids, rejected_inputs.attention_mask,
                     prompt_lengths, **rejected_extra,
                 )
-                self.model.enable_adapter_layers()
 
-            # ---- DPO loss ----
-            pi_diff = chosen_logps - rejected_logps
-            ref_diff = ref_chosen_logps - ref_rejected_logps
-            loss = -F.logsigmoid(beta * (pi_diff - ref_diff)).mean()
+                # ---- reference log-probs (LoRA off, no grad) ----
+                with torch.no_grad():
+                    self.model.disable_adapter_layers()
+                    ref_chosen_logps = self._compute_vlm_response_logps(
+                        chosen_inputs.input_ids, chosen_inputs.attention_mask,
+                        prompt_lengths, **chosen_extra,
+                    )
+                    ref_rejected_logps = self._compute_vlm_response_logps(
+                        rejected_inputs.input_ids, rejected_inputs.attention_mask,
+                        prompt_lengths, **rejected_extra,
+                    )
+                    self.model.enable_adapter_layers()
 
-            (loss / grad_accum).backward()
+                # ---- DPO loss ----
+                pi_diff = chosen_logps - rejected_logps
+                ref_diff = ref_chosen_logps - ref_rejected_logps
+                loss = -F.logsigmoid(beta * (pi_diff - ref_diff)).mean()
 
-            if (step + 1) % grad_accum == 0:
-                torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+                (loss / grad_accum).backward()
 
-            # ---- logging ----
-            if (step + 1) % logging_steps == 0:
-                reward_margin = (pi_diff - ref_diff).mean().item()
-                accuracy = ((pi_diff - ref_diff) > 0).float().mean().item()
-                logger.info(
-                    f"Step {step+1}/{max_steps} | loss={loss.item():.4f} "
-                    f"reward_margin={reward_margin:.4f} acc={accuracy:.2%}"
-                )
-                if self.writer:
-                    self.writer.add_scalar("dpo/loss", loss.item(), step + 1)
-                    self.writer.add_scalar("dpo/reward_margin", reward_margin, step + 1)
-                    self.writer.add_scalar("dpo/accuracy", accuracy, step + 1)
+                if (step + 1) % grad_accum == 0:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_grad_norm)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
 
-            # ---- checkpointing ----
-            if save_strategy == "logarithmic":
-                should_save, is_permanent = self._logarithmic_save_decision(step + 1)
-            else:
-                should_save = (step + 1) % save_steps == 0
-                is_permanent = True
+                # ---- logging ----
+                if (step + 1) % logging_steps == 0:
+                    reward_margin = (pi_diff - ref_diff).mean().item()
+                    accuracy = ((pi_diff - ref_diff) > 0).float().mean().item()
+                    logger.info(
+                        f"Step {step+1}/{max_steps} | loss={loss.item():.4f} "
+                        f"reward_margin={reward_margin:.4f} acc={accuracy:.2%}"
+                    )
+                    trace_file.write(
+                        json.dumps({
+                            "step": step + 1,
+                            "loss": loss.item(),
+                            "reward_margin": reward_margin,
+                            "accuracy": accuracy,
+                        }) + "\n"
+                    )
+                    trace_file.flush()
+                    if self.writer:
+                        self.writer.add_scalar("dpo/loss", loss.item(), step + 1)
+                        self.writer.add_scalar("dpo/reward_margin", reward_margin, step + 1)
+                        self.writer.add_scalar("dpo/accuracy", accuracy, step + 1)
 
-            if should_save:
-                ckpt_dir = self.output_dir / f"checkpoint-{step+1}"
-                ckpt_dir.mkdir(parents=True, exist_ok=True)
-                self.model.save_pretrained(ckpt_dir)
-                self.processor.save_pretrained(ckpt_dir)
-                tag = "permanent" if is_permanent else "temporary"
-                logger.info(f"Checkpoint saved to {ckpt_dir} ({tag})")
+                # ---- checkpointing ----
+                if save_strategy == "logarithmic":
+                    should_save, is_permanent = self._logarithmic_save_decision(step + 1)
+                else:
+                    should_save = (step + 1) % save_steps == 0
+                    is_permanent = True
 
-                if _last_temp_ckpt is not None and _last_temp_ckpt.exists():
-                    shutil.rmtree(_last_temp_ckpt)
-                    logger.info(f"Deleted rolling checkpoint {_last_temp_ckpt}")
+                if should_save:
+                    ckpt_dir = self.output_dir / f"checkpoint-{step+1}"
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    self.model.save_pretrained(ckpt_dir)
+                    self.processor.save_pretrained(ckpt_dir)
+                    tag = "permanent" if is_permanent else "temporary"
+                    logger.info(f"Checkpoint saved to {ckpt_dir} ({tag})")
 
-                _last_temp_ckpt = None if is_permanent else ckpt_dir
+                    if _last_temp_ckpt is not None and _last_temp_ckpt.exists():
+                        shutil.rmtree(_last_temp_ckpt)
+                        logger.info(f"Deleted rolling checkpoint {_last_temp_ckpt}")
 
-        # ---- save final model ----
-        final_dir = self.output_dir / "final_model"
-        final_dir.mkdir(parents=True, exist_ok=True)
-        self.model.save_pretrained(final_dir)
-        self.processor.save_pretrained(final_dir)
-        logger.info(f"Final model saved to {final_dir}")
+                    _last_temp_ckpt = None if is_permanent else ckpt_dir
+
+            # ---- save final model ----
+            final_dir = self.output_dir / "final_model"
+            final_dir.mkdir(parents=True, exist_ok=True)
+            self.model.save_pretrained(final_dir)
+            self.processor.save_pretrained(final_dir)
+            logger.info(f"Final model saved to {final_dir}")
+        finally:
+            trace_file.close()
 
     def cleanup(self):
         """Clean up resources."""
