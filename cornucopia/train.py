@@ -16,6 +16,7 @@ import torch
 from rich.console import Console
 
 from src.data.data_generator import DataGenerator
+from src.data.prompt_swallowing_data import prepare_prompt_swallowing_datasets
 from src.training.trainer import ToolTrainer
 from src.utils.config import ConfigManager
 from src.utils.logging_utils import setup_logging
@@ -82,18 +83,24 @@ def main():
         json.dump(config, f, indent=2)
     
     try:
-        # Initialize data generator
-        console.print("🔄 [bold blue]Initializing data generator...[/bold blue]")
-        data_generator = DataGenerator(
-            config["data"],
-            config.get("tools", []),
-            config.get("tokenizer", config["model"]),
-        )
-        
         # Generate or load training data
         console.print("📊 [bold blue]Preparing training data...[/bold blue]")
-        train_dataset, eval_dataset = data_generator.prepare_datasets()
-        
+
+        if config["training"]["method"] == "prompt_swallowing":
+            train_dataset, eval_dataset = prepare_prompt_swallowing_datasets(
+                config["data"],
+                config.get("tools", []),
+                config.get("tokenizer", config["model"]),
+                max_length=config["training"].get("max_length", 512),
+            )
+        else:
+            data_generator = DataGenerator(
+                config["data"],
+                config.get("tools", []),
+                config.get("tokenizer", config["model"]),
+            )
+            train_dataset, eval_dataset = data_generator.prepare_datasets()
+
         logger.info(f"Training samples: {len(train_dataset)}")
         logger.info(f"Evaluation samples: {len(eval_dataset)}")
         

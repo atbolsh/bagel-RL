@@ -27,9 +27,14 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import BitsAndBytesConfig
 from peft import prepare_model_for_kbit_training
 
+from torch.utils.data import DataLoader
+
 from ..tools.executor import ToolExecutor
 from ..data.data_generator import build_tool_system_prompt
-
+from ..data.prompt_swallowing_data import (
+    prepare_prompt_swallowing_datasets,
+    prompt_swallowing_collate_fn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -256,8 +261,13 @@ class ToolTrainer:
             self._train_dpo(resume_from_checkpoint)
         elif self.training_method == "stub_teacher_mode":
             self._train_stub_teacher_mode(resume_from_checkpoint)
+        elif self.training_method == "prompt_swallowing":
+            self._train_prompt_swallowing(resume_from_checkpoint)
         else:
-            raise ValueError(f"Unknown training method: {self.training_method}. Supported methods: sft, dpo, stub_teacher_mode")
+            raise ValueError(
+                f"Unknown training method: {self.training_method}. "
+                "Supported: sft, dpo, stub_teacher_mode, prompt_swallowing"
+            )
     
     def _train_sft(self, resume_from_checkpoint: Optional[str] = None):
         """Supervised fine-tuning."""
@@ -374,11 +384,158 @@ class ToolTrainer:
     def _train_stub_teacher_mode(self, resume_from_checkpoint: Optional[str] = None):
         """Stub teacher mode training (Toolformer-style, incomplete)."""
         logger.info("Starting teacher mode training...")
-        
-        # This combines SFT with self-supervised learning
-        # The data generation already handles teacher mode data creation
         self._train_sft(resume_from_checkpoint)
-    
+
+    def _load_teacher_model(self) -> AutoModelForCausalLM:
+        """Load frozen teacher model (same architecture as student, no LoRA)."""
+        model_config = self.config["model"]
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+        teacher = AutoModelForCausalLM.from_pretrained(
+            model_config["name"],
+            trust_remote_code=model_config.get("trust_remote_code", False),
+            torch_dtype=getattr(torch, model_config.get("torch_dtype", "float16")),
+            device_map=model_config.get("device_map", "auto"),
+            quantization_config=bnb_config,
+        )
+        teacher.eval()
+        for p in teacher.parameters():
+            p.requires_grad = False
+        return teacher
+
+    def _train_prompt_swallowing(self, resume_from_checkpoint: Optional[str] = None):
+        """Prompt swallowing: student learns to match teacher logits without seeing the prompt.
+
+        Batch mix: 50% swallowing, 25% unswallowed, 25% control.
+        Loss: MSE between teacher and student logits on aligned positions.
+        """
+        logger.info("Starting prompt_swallowing training...")
+
+        tc = self.config["training"]
+        batch_size = tc.get("batch_size", 4)
+        grad_accum = tc.get("gradient_accumulation_steps", 4)
+        max_steps = tc.get("max_steps", 1000)
+        lr = tc.get("learning_rate", 1e-5)
+        max_length = tc.get("max_length", 512)
+        logging_steps = tc.get("logging_steps", 10)
+        save_steps = tc.get("save_steps", 200)
+        warmup_steps = tc.get("warmup_steps", 50)
+
+        pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+
+        def collate(batch):
+            return prompt_swallowing_collate_fn(batch, pad_id, max_length)
+
+        train_loader = DataLoader(
+            self.train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate,
+            pin_memory=False,
+        )
+
+        teacher = self._load_teacher_model()
+        student = self.model
+        student.train()
+
+        device = next(student.parameters()).device
+        teacher = teacher.to(device)
+
+        optim = torch.optim.AdamW(
+            [p for p in student.parameters() if p.requires_grad],
+            lr=lr,
+            weight_decay=tc.get("weight_decay", 0.01),
+        )
+
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return float(step) / max(1, warmup_steps)
+            return 1.0
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda)
+
+        trace_path = self.output_dir / "learning_trace.jsonl"
+        trace_file = open(trace_path, "a")
+
+        global_step = 0
+        optim.zero_grad()
+
+        for epoch in range(100):
+            if global_step >= max_steps:
+                break
+            for batch in train_loader:
+                teacher_ids = batch["teacher_input_ids"].to(device)
+                student_ids = batch["student_input_ids"].to(device)
+                prompt_lens = batch["prompt_len"]
+                task_lens = batch["task_len"]
+
+                with torch.no_grad():
+                    teacher_out = teacher(input_ids=teacher_ids)
+                    teacher_logits = teacher_out.logits
+
+                student_out = student(input_ids=student_ids)
+                student_logits = student_out.logits
+
+                losses = []
+                for i in range(teacher_logits.size(0)):
+                    pl = prompt_lens[i]
+                    tl = task_lens[i]
+                    if tl <= 0:
+                        continue
+                    t_log = teacher_logits[i, pl : pl + tl, :]
+                    s_log = student_logits[i, :tl, :]
+                    if t_log.size(0) != s_log.size(0):
+                        m = min(t_log.size(0), s_log.size(0))
+                        t_log = t_log[:m]
+                        s_log = s_log[:m]
+                    losses.append(F.mse_loss(s_log, t_log))
+
+                if not losses:
+                    continue
+                loss = torch.stack(losses).mean() / grad_accum
+                loss.backward()
+
+                if (global_step + 1) % grad_accum == 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        student.parameters(), tc.get("max_grad_norm", 1.0)
+                    )
+                    optim.step()
+                    scheduler.step()
+                    optim.zero_grad()
+
+                global_step += 1
+                if global_step % logging_steps == 0:
+                    logger.info(f"Step {global_step}/{max_steps} loss={loss.item() * grad_accum:.4f}")
+                    trace_file.write(
+                        json.dumps({"step": global_step, "loss": loss.item() * grad_accum})
+                        + "\n"
+                    )
+                    trace_file.flush()
+                    if self.writer:
+                        self.writer.add_scalar("prompt_swallowing/loss", loss.item() * grad_accum, global_step)
+
+                if global_step % save_steps == 0:
+                    ckpt = self.output_dir / f"checkpoint-{global_step}"
+                    ckpt.mkdir(parents=True, exist_ok=True)
+                    student.save_pretrained(ckpt)
+                    self.tokenizer.save_pretrained(ckpt)
+                    logger.info(f"Saved checkpoint to {ckpt}")
+
+                if global_step >= max_steps:
+                    break
+
+        trace_file.close()
+
+        final_dir = self.output_dir / "prompt_swallowing_model"
+        final_dir.mkdir(parents=True, exist_ok=True)
+        student.save_pretrained(final_dir)
+        self.tokenizer.save_pretrained(final_dir)
+        logger.info(f"Prompt swallowing model saved to {final_dir}")
+
     def _tokenize_dataset(self, dataset: Dataset) -> Dataset:
         """Tokenize a dataset."""
         def tokenize_function(examples):

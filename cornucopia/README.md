@@ -89,7 +89,7 @@ The library uses JSON configuration files to define:
 ```json
 {
   "training": {
-    "method": "sft",  // "sft", "dpo", "stub_teacher_mode"
+    "method": "sft",  // "sft", "dpo", "stub_teacher_mode", "prompt_swallowing"
     "num_epochs": 3,
     "learning_rate": 5e-5,
     "batch_size": 4,
@@ -128,6 +128,7 @@ define the tools as well as the dataset.
 1. **Supervised Fine-tuning (SFT)**: Standard next-token prediction on tool-augmented conversations
 2. **DPO**: Direct Preference Optimization using preference pairs
 3. **Stub Teacher Mode**: Self-supervised data generation (Toolformer-style, incomplete stub)
+4. **Prompt Swallowing**: Distill a teacher (with system prompt) into a student that sees only task text; MSE loss on logits; 50% swallowing / 25% unswallowed / 25% control batches to reduce forgetting
 
 ## Data Generation Strategies
 

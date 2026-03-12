@@ -12,7 +12,10 @@ class ConfigManager:
     def __init__(self, config_path: str):
         self.config_path = Path(config_path)
         self.config = self._load_config()
-        skip_validation = self.config["data"]["strategy"].lower() in ("toolbench", "position_qa")
+        skip_validation = (
+            self.config["data"]["strategy"].lower() in ("toolbench", "position_qa")
+            or self.config.get("training", {}).get("method") == "prompt_swallowing"
+        )
         if not skip_validation:
             self._validate_config()
     
@@ -41,7 +44,7 @@ class ConfigManager:
                     "type": "object",
                     "required": ["method"],
                     "properties": {
-                        "method": {"enum": ["sft", "ppo", "dpo", "stub_teacher_mode"]},
+                        "method": {"enum": ["sft", "ppo", "dpo", "stub_teacher_mode", "prompt_swallowing"]},
                         "num_epochs": {"type": "integer", "minimum": 1},
                         "learning_rate": {"type": "number", "minimum": 0},
                         "batch_size": {"type": "integer", "minimum": 1},

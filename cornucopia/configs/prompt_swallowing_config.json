@@ -1,0 +1,91 @@
+{
+  "model": {
+    "name": "Qwen/Qwen3-0.6B",
+    "trust_remote_code": true,
+    "torch_dtype": "float16",
+    "device_map": "auto"
+  },
+  "tokenizer": {
+    "name": "Qwen/Qwen3-0.6B",
+    "trust_remote_code": true
+  },
+  "training": {
+    "method": "prompt_swallowing",
+    "max_steps": 500,
+    "learning_rate": 1e-5,
+    "batch_size": 4,
+    "gradient_accumulation_steps": 4,
+    "warmup_steps": 50,
+    "max_length": 512,
+    "max_grad_norm": 1.0,
+    "weight_decay": 0.01,
+    "logging_steps": 10,
+    "save_steps": 100,
+    "use_lora": true,
+    "lora_r": 8,
+    "lora_alpha": 16,
+    "lora_dropout": 0.1
+  },
+  "data": {
+    "strategy": "manual_templates",
+    "generation_type": "synthetic",
+    "max_samples": 500,
+    "control_max_samples": 5000,
+    "train_split": 0.85
+  },
+  "tools": [
+    {
+      "name": "calculator",
+      "description": "Perform mathematical calculations",
+      "type": "function",
+      "function": "calculator",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "expression": {
+            "type": "string",
+            "description": "Mathematical expression to evaluate"
+          }
+        },
+        "required": ["expression"]
+      }
+    },
+    {
+      "name": "weather",
+      "description": "Get weather information for a location",
+      "type": "function",
+      "function": "weather",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "location": {
+            "type": "string",
+            "description": "Location to get weather for"
+          }
+        },
+        "required": ["location"]
+      }
+    },
+    {
+      "name": "search",
+      "description": "Search for information on the internet",
+      "type": "function",
+      "function": "search",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query"
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  ],
+  "tensorboard": {
+    "enabled": true,
+    "log_dir": "outputs/runs"
+  },
+  "seed": 42
+}
