@@ -28,6 +28,7 @@ from transformers import BitsAndBytesConfig
 from peft import prepare_model_for_kbit_training
 
 from ..tools.executor import ToolExecutor
+from ..data.data_generator import build_tool_system_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -403,25 +404,39 @@ class ToolTrainer:
         )
     
     def _create_preference_dataset(self) -> Dataset:
-        """Create preference dataset for DPO."""
-        # This is a simplified implementation
-        # In practice, you'd want human preferences or model-based ranking
-        
+        """Create preference dataset for DPO.
+
+        Expects training examples to carry ``user_query`` and
+        ``assistant_response`` fields (set by the manual-template data
+        generator).  The prompt is built from a system message describing
+        the available tools plus the user query, formatted through the
+        chat template.
+        """
+        system_prompt = build_tool_system_prompt(self.config.get("tools", []))
+
         preference_data = []
-        
         for example in self.train_dataset:
-            # Create a "good" and "bad" version
-            good_response = example["text"]
-            
-            # Create a bad version by removing tool formatting
-            bad_response = good_response.replace("[TOOL_CALL]", "").replace("[/TOOL_CALL]", "")
-            
+            user_query = example.get("user_query", "")
+            good_response = example.get("assistant_response", "")
+
+            bad_response = (
+                good_response.replace("[TOOL_CALL]", "").replace("[/TOOL_CALL]", "")
+            )
+
+            prompt_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query},
+            ]
+            prompt_text = self.tokenizer.apply_chat_template(
+                prompt_messages, tokenize=False, add_generation_prompt=True
+            )
+
             preference_data.append({
-                "prompt": example["text"].split("Assistant:")[0] if "Assistant:" in example["text"] else "",
+                "prompt": prompt_text,
                 "chosen": good_response,
-                "rejected": bad_response
+                "rejected": bad_response,
             })
-        
+
         return Dataset.from_list(preference_data)
     
     # ------------------------------------------------------------------ #
