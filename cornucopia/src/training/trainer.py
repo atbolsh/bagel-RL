@@ -501,8 +501,8 @@ class ToolTrainer:
                     tl = task_lens[i]
                     if tl <= 0:
                         continue
-                    t_log = teacher_logits[i, pl : pl + tl, :]
-                    s_log = student_logits[i, :tl, :]
+                    t_log = teacher_logits[i, pl : pl + tl, :].float()
+                    s_log = student_logits[i, :tl, :].float()
                     if t_log.size(0) != s_log.size(0):
                         m = min(t_log.size(0), s_log.size(0))
                         t_log = t_log[:m]
