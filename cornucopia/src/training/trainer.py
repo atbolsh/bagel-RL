@@ -39,6 +39,7 @@ from ..utils.checkpoint_schedule import (
     logarithmic_save_decision,
     should_save_checkpoint,
 )
+from rich.markup import escape
 
 logger = logging.getLogger(__name__)
 
@@ -541,7 +542,7 @@ class ToolTrainer:
                             parts.append(f"{k}:--")
                             trace_row[k] = None
                     msg = " ".join(parts)
-                    logger.info(f"Step {global_step}/{max_steps} {msg}")
+                    logger.info(escape(f"Step {global_step}/{max_steps} {msg}"))
                     trace_file.write(json.dumps(trace_row) + "\n")
                     trace_file.flush()
                     if self.writer:
