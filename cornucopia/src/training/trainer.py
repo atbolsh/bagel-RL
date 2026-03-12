@@ -475,6 +475,7 @@ class ToolTrainer:
         trace_path = self.output_dir / "learning_trace.jsonl"
         trace_file = open(trace_path, "a")
         _last_temp_ckpt = None
+        _latest_loss_by_type = {"control": None, "unswallowed": None, "swallowing": None}
 
         global_step = 0
         optim.zero_grad()
@@ -487,6 +488,7 @@ class ToolTrainer:
                 student_ids = batch["student_input_ids"].to(device)
                 prompt_lens = batch["prompt_len"]
                 task_lens = batch["task_len"]
+                batch_types = batch["batch_types"]
 
                 with torch.no_grad():
                     teacher_out = teacher(input_ids=teacher_ids)
@@ -507,7 +509,11 @@ class ToolTrainer:
                         m = min(t_log.size(0), s_log.size(0))
                         t_log = t_log[:m]
                         s_log = s_log[:m]
-                    losses.append(F.mse_loss(s_log, t_log))
+                    loss_i = F.mse_loss(s_log, t_log)
+                    losses.append(loss_i)
+                    bt = batch_types[i]
+                    if bt in _latest_loss_by_type:
+                        _latest_loss_by_type[bt] = loss_i.item()
 
                 if not losses:
                     continue
@@ -524,14 +530,25 @@ class ToolTrainer:
 
                 global_step += 1
                 if global_step % logging_steps == 0:
-                    logger.info(f"Step {global_step}/{max_steps} loss={loss.item() * grad_accum:.4f}")
-                    trace_file.write(
-                        json.dumps({"step": global_step, "loss": loss.item() * grad_accum})
-                        + "\n"
-                    )
+                    parts = []
+                    trace_row = {"step": global_step}
+                    for k in ("control", "unswallowed", "swallowing"):
+                        v = _latest_loss_by_type[k]
+                        if v is not None:
+                            parts.append(f"{k}:{v:.4f}")
+                            trace_row[k] = round(v, 6)
+                        else:
+                            parts.append(f"{k}:--")
+                            trace_row[k] = None
+                    msg = " ".join(parts)
+                    logger.info(f"Step {global_step}/{max_steps} {msg}")
+                    trace_file.write(json.dumps(trace_row) + "\n")
                     trace_file.flush()
                     if self.writer:
-                        self.writer.add_scalar("prompt_swallowing/loss", loss.item() * grad_accum, global_step)
+                        for k, v in _latest_loss_by_type.items():
+                            if v is not None:
+                                self.writer.add_scalar(f"prompt_swallowing/{k}_loss", v, global_step)
+                    _latest_loss_by_type = {"control": None, "unswallowed": None, "swallowing": None}
 
                 should_save, is_permanent = should_save_checkpoint(
                     global_step, save_strategy, save_steps
