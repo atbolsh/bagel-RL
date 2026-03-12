@@ -130,11 +130,17 @@ class ToolTrainer:
             log_dir = self.config.get("tensorboard", {}).get("log_dir", str(output_dir / "runs"))
             self.writer = SummaryWriter(log_dir=log_dir)
 
-        # Initialize model and tokenizer/processor
+        # Initialize model and tokenizer/processor.
+        # For prompt_swallowing the student and teacher are loaded separately
+        # inside the training method to avoid holding two full copies at init.
         if self.is_vlm:
             self.processor = self._load_vlm_processor()
             self.tokenizer = self.processor.tokenizer
             self.model = self._load_vlm_model()
+        elif config["training"]["method"] == "prompt_swallowing":
+            self.processor = None
+            self.tokenizer = self._load_tokenizer()
+            self.model = None
         else:
             self.processor = None
             self.tokenizer = self._load_tokenizer()
@@ -438,12 +444,16 @@ class ToolTrainer:
             pin_memory=False,
         )
 
+        # Load teacher (frozen base model) and student (LoRA on same base)
+        # sequentially so we never hold two copies during loading.
+        logger.info("Loading teacher model (frozen)...")
         teacher = self._load_teacher_model()
-        student = self.model
-        student.train()
+        device = next(teacher.parameters()).device
 
-        device = next(student.parameters()).device
-        teacher = teacher.to(device)
+        logger.info("Loading student model (LoRA)...")
+        student = self._load_model()
+        self.model = student
+        student.train()
 
         optim = torch.optim.AdamW(
             [p for p in student.parameters() if p.requires_grad],
