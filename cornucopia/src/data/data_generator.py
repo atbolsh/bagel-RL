@@ -458,6 +458,180 @@ class DataGenerator:
 
         return paraphrases
     
+    # ------------------------------------------------------------------ #
+    # Large-scale diverse example generation
+    # ------------------------------------------------------------------ #
+
+    _CALC_TEMPLATES = [
+        "Calculate {e}", "What is {e}?", "Compute {e}", "Solve {e}",
+        "Find the result of {e}", "What's {e}?", "How much is {e}?",
+        "Evaluate {e}", "Can you compute {e}?", "Tell me the answer to {e}",
+        "Work out {e}", "Please calculate {e}", "Figure out {e}",
+        "I need the result of {e}", "What does {e} equal?",
+    ]
+    _WEATHER_TEMPLATES = [
+        "What's the weather in {l}?", "Check weather for {l}",
+        "Weather forecast for {l}", "How's the weather in {l}?",
+        "Tell me about {l} weather", "Is it raining in {l}?",
+        "What is the temperature in {l}?", "Weather in {l} today",
+        "Give me the forecast for {l}", "What's it like outside in {l}?",
+        "Current weather conditions in {l}", "How cold is it in {l}?",
+        "Will it rain in {l}?", "What should I wear in {l} today?",
+        "Check the forecast for {l} please",
+    ]
+    _SEARCH_TEMPLATES = [
+        "Search for {q}", "Find information about {q}", "Look up {q}",
+        "Research {q}", "Get results for {q}", "Tell me about {q}",
+        "What can you find on {q}?", "I want to learn about {q}",
+        "Find out about {q}", "Search the web for {q}",
+        "Look into {q} for me", "Get me info on {q}",
+        "What do you know about {q}?", "Help me find {q}",
+        "Can you search {q}?",
+    ]
+    _CITIES = [
+        "New York", "London", "Tokyo", "Paris", "Berlin", "Sydney",
+        "Cairo", "Mumbai", "Beijing", "Moscow", "Toronto", "São Paulo",
+        "Mexico City", "Istanbul", "Bangkok", "Seoul", "Dubai",
+        "Singapore", "Rome", "Madrid", "Vienna", "Prague", "Amsterdam",
+        "Stockholm", "Helsinki", "Oslo", "Copenhagen", "Warsaw",
+        "Budapest", "Athens", "Lisbon", "Dublin", "Edinburgh",
+        "Zurich", "Geneva", "Brussels", "Barcelona", "Milan",
+        "San Francisco", "Los Angeles", "Chicago", "Boston", "Seattle",
+        "Denver", "Miami", "Houston", "Dallas", "Atlanta",
+        "Vancouver", "Montreal", "Buenos Aires", "Lima", "Santiago",
+        "Bogotá", "Nairobi", "Lagos", "Cape Town", "Casablanca",
+        "Marrakech", "Tunis", "Addis Ababa", "Accra", "Dakar",
+        "Kuala Lumpur", "Jakarta", "Manila", "Hanoi", "Taipei",
+        "Osaka", "Kyoto", "Shanghai", "Shenzhen", "Guangzhou",
+        "Hong Kong", "Kolkata", "Chennai", "Bangalore", "Delhi",
+        "Karachi", "Lahore", "Dhaka", "Riyadh", "Doha",
+        "Abu Dhabi", "Tel Aviv", "Beirut", "Amman", "Baghdad",
+        "Havana", "San Juan", "Reykjavik", "Tallinn", "Riga",
+        "Vilnius", "Bucharest", "Sofia", "Belgrade", "Zagreb",
+    ]
+    _SEARCH_TOPICS_BASE = [
+        "Python programming", "machine learning", "climate change",
+        "quantum computing", "artificial intelligence", "blockchain",
+        "renewable energy", "space exploration", "genetic engineering",
+        "cybersecurity", "data science", "robotics", "virtual reality",
+        "augmented reality", "3D printing", "nanotechnology",
+        "deep learning", "natural language processing", "computer vision",
+        "autonomous vehicles", "internet of things", "cloud computing",
+        "edge computing", "cryptocurrency", "web development",
+        "mobile app development", "game development", "devops",
+        "kubernetes", "docker containers", "microservices architecture",
+        "functional programming", "Rust programming language",
+        "Go programming", "TypeScript", "React framework",
+        "neural networks", "reinforcement learning", "GANs",
+        "transformer models", "large language models", "diffusion models",
+        "protein folding", "CRISPR gene editing", "mRNA vaccines",
+        "nuclear fusion", "solar panel efficiency", "wind energy",
+        "electric vehicles", "battery technology", "superconductors",
+        "dark matter", "black holes", "exoplanets", "Mars colonization",
+        "gravitational waves", "history of mathematics", "philosophy",
+        "ancient Rome", "Renaissance art", "World War II",
+        "modern architecture", "urban planning", "sustainable farming",
+        "ocean conservation", "biodiversity", "deforestation",
+        "mental health", "nutrition science", "exercise physiology",
+        "sleep research", "meditation benefits", "stoic philosophy",
+        "cognitive psychology", "behavioral economics", "game theory",
+        "cryptography", "number theory", "topology", "linear algebra",
+        "differential equations", "probability theory", "statistics",
+        "Bayesian inference", "causal inference", "graph theory",
+        "operating systems", "compiler design", "database internals",
+        "distributed systems", "consensus algorithms", "MapReduce",
+        "information retrieval", "recommendation systems",
+        "speech recognition", "image segmentation", "object detection",
+        "time series forecasting", "anomaly detection",
+    ]
+    _SEARCH_QUALIFIERS = [
+        "", "beginner guide to", "advanced", "latest research on",
+        "best practices for", "introduction to", "history of",
+        "tutorials on", "examples of", "pros and cons of",
+        "comparison of", "how to get started with",
+        "common mistakes in", "future of", "applications of",
+    ]
+    _WEATHER_QUALIFIERS = [
+        "", "right now", "today", "this week", "this weekend",
+        "tomorrow", "tonight", "this morning", "this afternoon",
+    ]
+
+    @staticmethod
+    def _random_expression() -> str:
+        """Generate a random arithmetic expression."""
+        ops = ["+", "-", "*", "/"]
+        n_terms = random.randint(2, 4)
+        parts = [str(random.randint(1, 999))]
+        for _ in range(n_terms - 1):
+            parts.append(random.choice(ops))
+            parts.append(str(random.randint(1, 999)))
+        expr = " ".join(parts)
+        if random.random() < 0.2:
+            expr = f"({expr})"
+        if random.random() < 0.15:
+            expr += f" ** {random.randint(2, 3)}"
+        return expr
+
+    def generate_diverse_tool_examples(self, n: int) -> List[Dict[str, Any]]:
+        """Generate *n* diverse (user_query, assistant_response, tool_name) dicts.
+
+        Uses large pools of templates, cities, topics, and random arithmetic
+        to ensure high variety even at 50k+ scale.
+        """
+        examples: List[Dict[str, Any]] = []
+        tools = self.tools_config
+        if not tools:
+            raise ValueError("No tools configured")
+
+        tool_names = [t["name"] for t in tools]
+
+        for _ in range(n):
+            tool = random.choice(tools)
+            tool_name = tool["name"]
+
+            if tool_name == "calculator":
+                expr = self._random_expression()
+                template = random.choice(self._CALC_TEMPLATES)
+                user_query = template.format(e=expr)
+                params = {"expression": expr}
+            elif tool_name == "weather":
+                city = random.choice(self._CITIES)
+                qual = random.choice(self._WEATHER_QUALIFIERS)
+                template = random.choice(self._WEATHER_TEMPLATES)
+                loc = f"{city} {qual}".strip() if qual else city
+                user_query = template.format(l=loc)
+                params = {"location": city}
+            elif tool_name == "search":
+                base_topic = random.choice(self._SEARCH_TOPICS_BASE)
+                qual = random.choice(self._SEARCH_QUALIFIERS)
+                topic = f"{qual} {base_topic}".strip() if qual else base_topic
+                template = random.choice(self._SEARCH_TEMPLATES)
+                user_query = template.format(q=topic)
+                params = {"query": topic}
+            else:
+                user_query = f"Use {tool_name}"
+                params = {}
+
+            result = self.tool_executor.execute_tool(tool_name, params)
+            tool_call = json.dumps({"name": tool_name, "parameters": params})
+            result_str = json.dumps(result)
+
+            assistant_response = (
+                f"I'll help you with that. Let me use the {tool_name} function.\n\n"
+                f"[TOOL_CALL]{tool_call}[/TOOL_CALL]\n\n"
+                f"{result_str}\n\n"
+                f"Based on the result, the answer is "
+                f"{result.get('result', 'processed successfully')}."
+            )
+
+            examples.append({
+                "user_query": user_query,
+                "assistant_response": assistant_response,
+                "tool_name": tool_name,
+            })
+
+        return examples
+
     def _split_dataset(self, data: List[Dict[str, Any]]) -> Tuple[Dataset, Dataset]:
         """Split data into train and eval datasets."""
         random.shuffle(data)

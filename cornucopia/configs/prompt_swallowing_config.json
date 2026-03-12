@@ -29,8 +29,8 @@
   "data": {
     "strategy": "manual_templates",
     "generation_type": "synthetic",
-    "max_samples": 500,
-    "control_max_samples": 5000,
+    "max_samples": 50000,
+    "control_max_samples": 10000,
     "train_split": 0.85
   },
   "tools": [
