@@ -20,6 +20,7 @@
     "max_grad_norm": 1.0,
     "weight_decay": 0.01,
     "logging_steps": 10,
+    "save_strategy": "logarithmic",
     "save_steps": 100,
     "use_lora": true,
     "lora_r": 8,

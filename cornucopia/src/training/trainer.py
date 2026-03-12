@@ -35,6 +35,10 @@ from ..data.prompt_swallowing_data import (
     prepare_prompt_swallowing_datasets,
     prompt_swallowing_collate_fn,
 )
+from ..utils.checkpoint_schedule import (
+    logarithmic_save_decision,
+    should_save_checkpoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +47,7 @@ class LogarithmicSaveCallback(TrainerCallback):
     """HF Trainer callback that implements logarithmic checkpoint saving.
 
     When attached to a Trainer whose built-in ``save_strategy`` has been set
-    to ``"no"``, this callback takes over checkpointing entirely, using the
-    same logarithmic schedule as ``ToolTrainer._logarithmic_save_decision``.
+    to ``"no"``, this callback takes over checkpointing entirely.
     """
 
     def __init__(self, output_dir):
@@ -54,7 +57,7 @@ class LogarithmicSaveCallback(TrainerCallback):
 
     def on_step_end(self, args, state, control, **kwargs):
         step = state.global_step
-        should_save, is_permanent = ToolTrainer._logarithmic_save_decision(step)
+        should_save, is_permanent = logarithmic_save_decision(step)
         if should_save:
             control.should_save = True
             self._current_is_permanent = is_permanent
@@ -429,6 +432,7 @@ class ToolTrainer:
         max_length = tc.get("max_length", 512)
         logging_steps = tc.get("logging_steps", 10)
         save_steps = tc.get("save_steps", 200)
+        save_strategy = tc.get("save_strategy", "steps")
         warmup_steps = tc.get("warmup_steps", 50)
 
         pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
@@ -470,6 +474,7 @@ class ToolTrainer:
 
         trace_path = self.output_dir / "learning_trace.jsonl"
         trace_file = open(trace_path, "a")
+        _last_temp_ckpt = None
 
         global_step = 0
         optim.zero_grad()
@@ -528,12 +533,22 @@ class ToolTrainer:
                     if self.writer:
                         self.writer.add_scalar("prompt_swallowing/loss", loss.item() * grad_accum, global_step)
 
-                if global_step % save_steps == 0:
-                    ckpt = self.output_dir / f"checkpoint-{global_step}"
-                    ckpt.mkdir(parents=True, exist_ok=True)
-                    student.save_pretrained(ckpt)
-                    self.tokenizer.save_pretrained(ckpt)
-                    logger.info(f"Saved checkpoint to {ckpt}")
+                should_save, is_permanent = should_save_checkpoint(
+                    global_step, save_strategy, save_steps
+                )
+                if should_save:
+                    ckpt_dir = self.output_dir / f"checkpoint-{global_step}"
+                    ckpt_dir.mkdir(parents=True, exist_ok=True)
+                    student.save_pretrained(ckpt_dir)
+                    self.tokenizer.save_pretrained(ckpt_dir)
+                    tag = "permanent" if is_permanent else "temporary"
+                    logger.info(f"Checkpoint saved to {ckpt_dir} ({tag})")
+
+                    if _last_temp_ckpt is not None and _last_temp_ckpt.exists():
+                        shutil.rmtree(_last_temp_ckpt)
+                        logger.info(f"Deleted rolling checkpoint {_last_temp_ckpt}")
+
+                    _last_temp_ckpt = None if is_permanent else ckpt_dir
 
                 if global_step >= max_steps:
                     break
@@ -606,39 +621,6 @@ class ToolTrainer:
 
         return Dataset.from_list(preference_data)
     
-    # ------------------------------------------------------------------ #
-    # Logarithmic checkpoint strategy
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _logarithmic_save_decision(step: int):
-        """Determine whether *step* should be checkpointed and if so whether
-        the checkpoint is permanent or temporary (rolling).
-
-        Returns ``(should_save, is_permanent)``.
-
-        Permanent saves happen at "round" numbers: 100, 200, …, 900,
-        1000, 2000, …, 9000, 10000, 20000, …, 90000, etc.
-
-        Starting from decade 4 (10 000+), rolling temporary saves are
-        placed at the next-finer granularity between permanents.  Only the
-        most recent temporary is kept; the previous one is deleted.
-        """
-        if step < 100:
-            return False, False
-
-        import math
-        d = int(math.log10(step))          # decade exponent
-        magnitude = 10 ** d
-
-        if step % magnitude == 0:
-            return True, True              # permanent
-
-        if d >= 4 and step % (magnitude // 10) == 0:
-            return True, False             # temporary (rolling)
-
-        return False, False
-
     # ------------------------------------------------------------------ #
     # VLM loading
     # ------------------------------------------------------------------ #
@@ -931,11 +913,9 @@ class ToolTrainer:
                         self.writer.add_scalar("dpo/accuracy", accuracy, step + 1)
 
                 # ---- checkpointing ----
-                if save_strategy == "logarithmic":
-                    should_save, is_permanent = self._logarithmic_save_decision(step + 1)
-                else:
-                    should_save = (step + 1) % save_steps == 0
-                    is_permanent = True
+                should_save, is_permanent = should_save_checkpoint(
+                    step + 1, save_strategy, save_steps
+                )
 
                 if should_save:
                     ckpt_dir = self.output_dir / f"checkpoint-{step+1}"
