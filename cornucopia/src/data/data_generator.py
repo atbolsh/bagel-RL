@@ -119,8 +119,8 @@ class DataGenerator:
             return self._prepare_real_toolbench_data()
         elif self.strategy == "toolbench" and self.generation_type.lower()=='synthetic':
             return self._prepare_synthetic_toolbench_data()
-        elif self.strategy == "teacher_mode" and self.generation_type.lower()=='synthetic':
-            return self._prepare_teacher_mode_data()
+        elif self.strategy == "stub_teacher_mode" and self.generation_type.lower()=='synthetic':
+            return self._prepare_stub_teacher_mode_data()
         elif self.strategy == "manual_templates" and self.generation_type.lower()=='synthetic':
             return self._prepare_manual_template_data()
         elif self.strategy == "position_qa":
@@ -234,7 +234,7 @@ class DataGenerator:
 
     
     
-    def _prepare_teacher_mode_data(self) -> Tuple[Dataset, Dataset]:
+    def _prepare_stub_teacher_mode_data(self) -> Tuple[Dataset, Dataset]:
         """Generate data using teacher mode (Toolformer-style).
 
         Each example is pre-tokenized with assistant-only label masking.

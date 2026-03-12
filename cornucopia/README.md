@@ -89,7 +89,7 @@ The library uses JSON configuration files to define:
 ```json
 {
   "training": {
-    "method": "sft",  // "sft", "dpo", "teacher_mode"
+    "method": "sft",  // "sft", "dpo", "stub_teacher_mode"
     "num_epochs": 3,
     "learning_rate": 5e-5,
     "batch_size": 4,
@@ -127,12 +127,12 @@ define the tools as well as the dataset.
 
 1. **Supervised Fine-tuning (SFT)**: Standard next-token prediction on tool-augmented conversations
 2. **DPO**: Direct Preference Optimization using preference pairs
-3. **Teacher Mode**: Self-supervised data generation (Toolformer-style) with synthetic data
+3. **Stub Teacher Mode**: Self-supervised data generation (Toolformer-style, incomplete stub)
 
 ## Data Generation Strategies
 
 1. **ToolBench**: Use both real and synthetic tool bench datasets
-2. **Teacher Mode**: LLM generates its own tool-augmented examples
+2. **Stub Teacher Mode**: LLM generates its own tool-augmented examples (incomplete stub)
 3. **Manual Templates**: Bootstrap from canonical examples with paraphrasing
 
 ## Built-in Tools

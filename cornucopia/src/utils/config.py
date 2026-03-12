@@ -41,7 +41,7 @@ class ConfigManager:
                     "type": "object",
                     "required": ["method"],
                     "properties": {
-                        "method": {"enum": ["sft", "ppo", "dpo", "teacher_mode"]},
+                        "method": {"enum": ["sft", "ppo", "dpo", "stub_teacher_mode"]},
                         "num_epochs": {"type": "integer", "minimum": 1},
                         "learning_rate": {"type": "number", "minimum": 0},
                         "batch_size": {"type": "integer", "minimum": 1},
@@ -54,7 +54,7 @@ class ConfigManager:
                     "type": "object",
                     "required": ["strategy"],
                     "properties": {
-                        "strategy": {"enum": ["toolbench", "teacher_mode", "manual_templates", "position_qa"]},
+                        "strategy": {"enum": ["toolbench", "stub_teacher_mode", "manual_templates", "position_qa"]},
                         "max_samples": {"type": "integer", "minimum": 1},
                         "train_split": {"type": "number", "minimum": 0, "maximum": 1}
                     }

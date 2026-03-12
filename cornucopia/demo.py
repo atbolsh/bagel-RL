@@ -89,7 +89,7 @@ def demonstrate_data_generation():
     
     strategies = [
         ("manual_templates", "Manual templates with paraphrasing"),
-        ("teacher_mode", "Teacher mode (Toolformer-style)"),
+        ("stub_teacher_mode", "Stub teacher mode (Toolformer-style, incomplete)"),
         ("toolbench", "ToolBench-style synthetic data")
     ]
     
@@ -148,7 +148,7 @@ def show_training_configurations():
     config_files = [
         ("calculator_config.json", "Supervised Fine-tuning with Calculator"),
         ("ppo_config.json", "PPO Training with Rewards"),
-        ("teacher_mode_config.json", "Teacher Mode Multi-tool Training")
+        ("stub_teacher_mode_config.json", "Stub Teacher Mode Multi-tool Training")
     ]
     
     for config_file, description in config_files:

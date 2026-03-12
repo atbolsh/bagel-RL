@@ -12,7 +12,7 @@
   },
 
   "training": {
-    "method": "teacher_mode",
+    "method": "stub_teacher_mode",
     "num_epochs": 2,
     "learning_rate": 3e-5,
     "batch_size": 2,
@@ -25,7 +25,7 @@
     "lora_dropout": 0.1
   },
   "data": {
-    "strategy": "teacher_mode",
+    "strategy": "stub_teacher_mode",
     "generation_type":"synthetic",
     "max_samples": 150,
     "train_split": 0.85

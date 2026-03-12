@@ -254,10 +254,10 @@ class ToolTrainer:
             self._train_sft(resume_from_checkpoint)
         elif self.training_method == "dpo":
             self._train_dpo(resume_from_checkpoint)
-        elif self.training_method == "teacher_mode":
-            self._train_teacher_mode(resume_from_checkpoint)
+        elif self.training_method == "stub_teacher_mode":
+            self._train_stub_teacher_mode(resume_from_checkpoint)
         else:
-            raise ValueError(f"Unknown training method: {self.training_method}. Supported methods: sft, dpo, teacher_mode")
+            raise ValueError(f"Unknown training method: {self.training_method}. Supported methods: sft, dpo, stub_teacher_mode")
     
     def _train_sft(self, resume_from_checkpoint: Optional[str] = None):
         """Supervised fine-tuning."""
@@ -371,8 +371,8 @@ class ToolTrainer:
         trainer.save_model(self.output_dir / "dpo_model")
         logger.info(f"Model saved to {self.output_dir / 'dpo_model'}")
     
-    def _train_teacher_mode(self, resume_from_checkpoint: Optional[str] = None):
-        """Teacher mode training (Toolformer-style)."""
+    def _train_stub_teacher_mode(self, resume_from_checkpoint: Optional[str] = None):
+        """Stub teacher mode training (Toolformer-style, incomplete)."""
         logger.info("Starting teacher mode training...")
         
         # This combines SFT with self-supervised learning
