@@ -20,7 +20,7 @@ try:
 except ImportError:
     from transformers import AutoModelForVision2Seq
 from datasets import Dataset
-from peft import LoraConfig, get_peft_model, TaskType
+from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 from trl import DPOTrainer, SFTTrainer
 from trl import DPOConfig, SFTConfig
 from torch.utils.tensorboard import SummaryWriter
@@ -417,6 +417,29 @@ class ToolTrainer:
             p.requires_grad = False
         return teacher
 
+    def _load_student_from_checkpoint(self, checkpoint_dir: str) -> AutoModelForCausalLM:
+        """Load student model with LoRA adapter from a saved checkpoint."""
+        model_config = self.config["model"]
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_compute_dtype="bfloat16",
+        )
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_config["name"],
+            trust_remote_code=model_config.get("trust_remote_code", False),
+            torch_dtype=getattr(torch, model_config.get("torch_dtype", "float16")),
+            device_map=model_config.get("device_map", "auto"),
+            quantization_config=bnb_config,
+        )
+        base_model = prepare_model_for_kbit_training(base_model)
+        student = PeftModel.from_pretrained(
+            base_model, checkpoint_dir, is_trainable=True
+        )
+        student.print_trainable_parameters()
+        return student
+
     def _train_prompt_swallowing(self, resume_from_checkpoint: Optional[str] = None):
         """Prompt swallowing: student learns to match teacher logits without seeing the prompt.
 
@@ -456,8 +479,17 @@ class ToolTrainer:
         device = next(teacher.parameters()).device
 
         logger.info("Loading student model (LoRA)...")
-        student = self._load_model()
+        if resume_from_checkpoint:
+            student = self._load_student_from_checkpoint(resume_from_checkpoint)
+        else:
+            student = self._load_model()
         self.model = student
+
+        if hasattr(student, "gradient_checkpointing_enable"):
+            student.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+
         student.train()
 
         optim = torch.optim.AdamW(
@@ -466,6 +498,25 @@ class ToolTrainer:
             weight_decay=tc.get("weight_decay", 0.01),
         )
 
+        # Determine starting step when resuming
+        global_step = 0
+        scheduler_restored = False
+        if resume_from_checkpoint:
+            ckpt_name = Path(resume_from_checkpoint).name
+            try:
+                global_step = int(ckpt_name.split("-")[-1])
+                logger.info(f"Resuming from step {global_step}")
+            except ValueError:
+                pass
+
+            state_path = Path(resume_from_checkpoint) / "training_state.pt"
+            if state_path.exists():
+                state = torch.load(state_path, map_location="cpu", weights_only=False)
+                optim.load_state_dict(state["optimizer"])
+                global_step = state.get("global_step", global_step)
+                logger.info(f"Restored optimizer state from {state_path}")
+                del state
+
         def lr_lambda(step):
             if step < warmup_steps:
                 return float(step) / max(1, warmup_steps)
@@ -473,12 +524,25 @@ class ToolTrainer:
 
         scheduler = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda)
 
+        if resume_from_checkpoint:
+            state_path = Path(resume_from_checkpoint) / "training_state.pt"
+            if state_path.exists():
+                state = torch.load(state_path, map_location="cpu", weights_only=False)
+                if "scheduler" in state:
+                    scheduler.load_state_dict(state["scheduler"])
+                    scheduler_restored = True
+                del state
+            if not scheduler_restored and global_step > 0:
+                scheduler.last_epoch = global_step
+                for group in optim.param_groups:
+                    group["lr"] = lr * lr_lambda(global_step)
+
         trace_path = self.output_dir / "learning_trace.jsonl"
         trace_file = open(trace_path, "a")
         _last_temp_ckpt = None
         _latest_loss_by_type = {"control": None, "unswallowed": None, "swallowing": None}
 
-        global_step = 0
+        gc_interval = max(10, logging_steps)
         optim.zero_grad()
 
         for epoch in range(100):
@@ -491,20 +555,32 @@ class ToolTrainer:
                 task_lens = batch["task_len"]
                 batch_types = batch["batch_types"]
 
+                # Teacher forward: extract only the logit slices we need,
+                # then free the full output immediately.
                 with torch.no_grad():
-                    teacher_out = teacher(input_ids=teacher_ids)
-                    teacher_logits = teacher_out.logits
+                    t_logits = teacher(input_ids=teacher_ids).logits
+                    teacher_slices = []
+                    for i in range(t_logits.size(0)):
+                        pl = prompt_lens[i]
+                        tl = task_lens[i]
+                        if tl <= 0:
+                            teacher_slices.append(None)
+                        else:
+                            teacher_slices.append(
+                                t_logits[i, pl : pl + tl, :].clone()
+                            )
+                    del t_logits
+                del teacher_ids
 
-                student_out = student(input_ids=student_ids)
-                student_logits = student_out.logits
+                # Student forward
+                student_logits = student(input_ids=student_ids).logits
 
                 losses = []
-                for i in range(teacher_logits.size(0)):
-                    pl = prompt_lens[i]
+                for i in range(student_logits.size(0)):
                     tl = task_lens[i]
-                    if tl <= 0:
+                    if teacher_slices[i] is None or tl <= 0:
                         continue
-                    t_log = teacher_logits[i, pl : pl + tl, :].float()
+                    t_log = teacher_slices[i].float()
                     s_log = student_logits[i, :tl, :].float()
                     if t_log.size(0) != s_log.size(0):
                         m = min(t_log.size(0), s_log.size(0))
@@ -516,10 +592,19 @@ class ToolTrainer:
                     if bt in _latest_loss_by_type:
                         _latest_loss_by_type[bt] = loss_i.item()
 
+                del teacher_slices
+
                 if not losses:
+                    del student_logits, student_ids
                     continue
+
                 loss = torch.stack(losses).mean() / grad_accum
                 loss.backward()
+
+                del student_logits, student_ids, losses, loss
+
+                if global_step % gc_interval == 0:
+                    torch.cuda.empty_cache()
 
                 if (global_step + 1) % grad_accum == 0:
                     torch.nn.utils.clip_grad_norm_(
@@ -559,6 +644,11 @@ class ToolTrainer:
                     ckpt_dir.mkdir(parents=True, exist_ok=True)
                     student.save_pretrained(ckpt_dir)
                     self.tokenizer.save_pretrained(ckpt_dir)
+                    torch.save({
+                        "global_step": global_step,
+                        "optimizer": optim.state_dict(),
+                        "scheduler": scheduler.state_dict(),
+                    }, ckpt_dir / "training_state.pt")
                     tag = "permanent" if is_permanent else "temporary"
                     logger.info(f"Checkpoint saved to {ckpt_dir} ({tag})")
 
