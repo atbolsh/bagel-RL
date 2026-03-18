@@ -140,6 +140,18 @@ class ToolTrainer:
         if self.is_vlm:
             self.processor = self._load_vlm_processor()
             self.tokenizer = self.processor.tokenizer
+            # Add game action tokens for multi-task training
+            self._n_added_game_tokens = 0
+            if config["data"].get("strategy") == "multi_task":
+                game_tokens = ["<forward>", "<clock>", "<anticlock>"]
+                self._n_added_game_tokens = self.tokenizer.add_tokens(
+                    game_tokens, special_tokens=True
+                )
+                if self._n_added_game_tokens > 0:
+                    logger.info(
+                        f"Added {self._n_added_game_tokens} game action tokens "
+                        f"to VLM tokenizer"
+                    )
             self.model = self._load_vlm_model()
         elif config["training"]["method"] == "prompt_swallowing":
             self.processor = None
@@ -761,6 +773,10 @@ class ToolTrainer:
                 device_map=model_config.get("device_map", "auto"),
                 quantization_config=bnb_config,
             )
+
+            if self._n_added_game_tokens > 0:
+                model.resize_token_embeddings(len(self.tokenizer))
+
             model = prepare_model_for_kbit_training(model)
 
             lora_config = LoraConfig(
@@ -780,6 +796,9 @@ class ToolTrainer:
                 torch_dtype=getattr(torch, model_config.get("torch_dtype", "bfloat16")),
                 device_map=model_config.get("device_map", "auto"),
             )
+
+            if self._n_added_game_tokens > 0:
+                model.resize_token_embeddings(len(self.tokenizer))
 
         return model
 
@@ -886,8 +905,6 @@ class ToolTrainer:
 
     def _train_dpo_vlm(self, resume_from_checkpoint: Optional[str] = None):
         """Custom DPO training loop for VLMs with online data generation."""
-        from ..data.position_qa_generator import PositionQAGenerator
-
         tc = self.config["training"]
         batch_size = tc.get("batch_size", 4)
         max_steps = tc.get("max_steps", 5000)
@@ -900,9 +917,18 @@ class ToolTrainer:
         max_grad_norm = tc.get("max_grad_norm", 0.3)
         warmup_steps = tc.get("warmup_steps", 100)
 
-        generator = PositionQAGenerator(
-            cross_axis_negative_prob=tc.get("cross_axis_negative_prob", 0.3),
-        )
+        data_strategy = self.config["data"].get("strategy", "position_qa")
+        if data_strategy == "multi_task":
+            from ..data.multi_task_generator import MultiTaskGenerator
+            generator = MultiTaskGenerator(
+                tasks=self.config["data"].get("tasks"),
+                cross_axis_negative_prob=tc.get("cross_axis_negative_prob", 0.3),
+            )
+        else:
+            from ..data.position_qa_generator import PositionQAGenerator
+            generator = PositionQAGenerator(
+                cross_axis_negative_prob=tc.get("cross_axis_negative_prob", 0.3),
+            )
 
         # Optimizer
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]

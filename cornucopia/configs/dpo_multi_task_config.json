@@ -1,0 +1,58 @@
+{
+  "model": {
+    "name": "Qwen/Qwen3-VL-2B-Instruct",
+    "model_type": "vlm",
+    "trust_remote_code": true,
+    "torch_dtype": "bfloat16",
+    "device_map": "auto"
+  },
+
+  "tokenizer": {
+    "name": "Qwen/Qwen3-VL-2B-Instruct",
+    "trust_remote_code": true
+  },
+
+  "training": {
+    "method": "dpo",
+    "max_steps": 500000,
+    "learning_rate": 1e-6,
+    "batch_size": 200,
+    "gradient_accumulation_steps": 8,
+    "warmup_steps": 100,
+    "use_lora": true,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.1,
+    "max_grad_norm": 0.3,
+    "bf16": true,
+    "fp16": false,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 1e-8,
+    "weight_decay": 0.01,
+    "optim": "paged_adamw_8bit",
+    "dpo_beta": 0.1,
+    "save_steps": 500,
+    "logging_steps": 10,
+    "cross_axis_negative_prob": 0.3,
+    "save_strategy": "logarithmic"
+  },
+
+  "data": {
+    "strategy": "multi_task",
+    "generation_type": "online",
+    "tasks": [
+      "position_qa",
+      "relposition_qa",
+      "near_gold_qa",
+      "gold_direction_qa",
+      "blue_line_qa",
+      "comparison_v1",
+      "direction_names"
+    ]
+  },
+
+  "tools": [],
+
+  "seed": 42
+}

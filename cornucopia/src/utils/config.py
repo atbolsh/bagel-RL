@@ -13,7 +13,7 @@ class ConfigManager:
         self.config_path = Path(config_path)
         self.config = self._load_config()
         skip_validation = (
-            self.config["data"]["strategy"].lower() in ("toolbench", "position_qa")
+            self.config["data"]["strategy"].lower() in ("toolbench", "position_qa", "multi_task")
             or self.config.get("training", {}).get("method") == "prompt_swallowing"
         )
         if not skip_validation:

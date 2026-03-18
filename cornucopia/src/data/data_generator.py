@@ -57,7 +57,7 @@ class DataGenerator:
         self.strategy = data_config["strategy"]
         self.generation_type = data_config.get("generation_type", "online")
 
-        if self.strategy == "position_qa":
+        if self.strategy in ("position_qa", "multi_task"):
             self.tokenizer = None
             self.tool_executor = None
             return
@@ -124,6 +124,8 @@ class DataGenerator:
         elif self.strategy == "manual_templates" and self.generation_type.lower()=='synthetic':
             return self._prepare_manual_template_data()
         elif self.strategy == "position_qa":
+            return self._prepare_position_qa_placeholder()
+        elif self.strategy == "multi_task":
             return self._prepare_position_qa_placeholder()
         else:
             raise ValueError(f"Unknown data strategy: {self.strategy}. Data generation strategy {self.generation_type} is not implemented for {self.strategy} ")
