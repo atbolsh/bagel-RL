@@ -164,7 +164,7 @@ runs/
 logs/
 
 # Model outputs and training artifacts
-data
+/data/
 outputs
 outputs/checkpoints/
 outputs/models/
