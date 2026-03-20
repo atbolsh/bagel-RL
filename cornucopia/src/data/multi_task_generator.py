@@ -71,4 +71,5 @@ class MultiTaskGenerator:
     def generate_batch(self, batch_size: int) -> List[Dict[str, Any]]:
         """Generate a batch from one randomly-chosen task."""
         task = random.choice(self._task_names)
+        self.last_batch_task = task
         return self.generators[task].generate_batch(batch_size)

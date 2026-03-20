@@ -116,6 +116,7 @@ class PositionQAGenerator:
             chosen  : str               – correct answer
             rejected: str               – wrong answer
         """
+        self.last_batch_task = "position_qa"
         settings_batch = get_settings_batch(batch_size)
         imgs_tensor = get_images(settings_batch, device='cpu')  # (B, 3, 224, 224)
 

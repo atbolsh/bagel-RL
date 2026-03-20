@@ -1083,6 +1083,9 @@ class ToolTrainer:
             for step in range(start_step, max_steps):
                 # ---- generate data ----
                 samples = generator.generate_batch(batch_size)
+                task_name = getattr(
+                    generator, "last_batch_task", None
+                ) or data_strategy
                 chosen_inputs, rejected_inputs, prompt_lengths = (
                     self._process_dpo_vlm_samples(samples)
                 )
@@ -1137,12 +1140,14 @@ class ToolTrainer:
                 reward_margin = (pi_diff - ref_diff).mean().item()
                 accuracy = ((pi_diff - ref_diff) > 0).float().mean().item()
                 logger.info(
-                    f"Step {step+1}/{max_steps} | loss={loss.item():.4f} "
+                    f"[{task_name}] Step {step+1}/{max_steps} | "
+                    f"loss={loss.item():.4f} "
                     f"reward_margin={reward_margin:.4f} acc={accuracy:.2%}"
                 )
                 trace_file.write(
                     json.dumps({
                         "step": step + 1,
+                        "task": task_name,
                         "loss": loss.item(),
                         "reward_margin": reward_margin,
                         "accuracy": accuracy,
