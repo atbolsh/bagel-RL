@@ -802,6 +802,61 @@ class ToolTrainer:
 
         return model
 
+    def _parse_vlm_dpo_checkpoint_step(self, resume_from_checkpoint: Optional[str]) -> int:
+        """Infer the next training loop index from ``checkpoint-{N}`` folder name."""
+        if not resume_from_checkpoint:
+            return 0
+        name = Path(resume_from_checkpoint).name
+        if name.startswith("checkpoint-"):
+            try:
+                return int(name.split("-", 1)[1])
+            except ValueError:
+                pass
+        return 0
+
+    def _load_vlm_peft_adapter_from_path(self, checkpoint_dir: Path) -> None:
+        """Load LoRA adapter tensors from a PEFT checkpoint into the current VLM."""
+        checkpoint_dir = Path(checkpoint_dir).expanduser().resolve()
+        if not checkpoint_dir.is_dir():
+            raise FileNotFoundError(f"Resume checkpoint not found: {checkpoint_dir}")
+        safetensors_path = checkpoint_dir / "adapter_model.safetensors"
+        bin_path = checkpoint_dir / "adapter_model.bin"
+        if safetensors_path.exists():
+            from safetensors.torch import load_file
+
+            state_dict = load_file(str(safetensors_path))
+        elif bin_path.exists():
+            state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
+        else:
+            raise FileNotFoundError(
+                f"No adapter_model.safetensors or adapter_model.bin in {checkpoint_dir}"
+            )
+
+        adapter_name = getattr(self.model, "active_adapter", None) or "default"
+        if not isinstance(adapter_name, str):
+            adapter_name = str(adapter_name)
+
+        set_fn = None
+        try:
+            from peft.utils.other import set_peft_model_state_dict as set_fn
+        except ImportError:
+            try:
+                from peft.utils import set_peft_model_state_dict as set_fn
+            except ImportError:
+                set_fn = None
+        if set_fn is not None:
+            set_fn(self.model, state_dict, adapter_name=adapter_name)
+            logger.info(f"Loaded PEFT adapter from {checkpoint_dir}")
+            return
+
+        r = self.model.load_state_dict(state_dict, strict=False)
+        if r.missing_keys or r.unexpected_keys:
+            logger.warning(
+                "PEFT resume used non-strict load_state_dict; "
+                f"missing={len(r.missing_keys)} unexpected={len(r.unexpected_keys)}"
+            )
+        logger.info(f"Loaded PEFT adapter weights (fallback) from {checkpoint_dir}")
+
     # ------------------------------------------------------------------ #
     # VLM DPO training
     # ------------------------------------------------------------------ #
@@ -930,7 +985,23 @@ class ToolTrainer:
                 cross_axis_negative_prob=tc.get("cross_axis_negative_prob", 0.3),
             )
 
-        # Optimizer
+        if hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+
+        start_step = 0
+        if resume_from_checkpoint:
+            self._load_vlm_peft_adapter_from_path(Path(resume_from_checkpoint))
+            start_step = self._parse_vlm_dpo_checkpoint_step(resume_from_checkpoint)
+            if start_step > 0:
+                logger.info(
+                    f"Resuming VLM DPO from loop step {start_step} "
+                    f"({start_step // grad_accum} optimizer/scheduler steps so far); "
+                    "adapter weights restored, optimizer state fresh"
+                )
+
+        # Optimizer (after optional adapter load so it tracks final tensors)
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         optim_name = tc.get("optim", "paged_adamw_8bit")
         optim_kwargs = dict(
@@ -952,16 +1023,19 @@ class ToolTrainer:
             return 1.0
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-        if hasattr(self.model, "gradient_checkpointing_enable"):
-            self.model.gradient_checkpointing_enable(
-                gradient_checkpointing_kwargs={"use_reentrant": False}
-            )
+        if start_step > 0:
+            n_sched = start_step // grad_accum
+            if n_sched > 0:
+                scheduler.last_epoch = n_sched - 1
+                for group in optimizer.param_groups:
+                    group["lr"] = lr * lr_lambda(scheduler.last_epoch)
 
         self.model.train()
         optimizer.zero_grad()
 
         logger.info(
-            f"Starting VLM DPO training: {max_steps} steps, "
+            f"Starting VLM DPO training: steps {start_step}..{max_steps - 1} "
+            f"(target {max_steps} iters), "
             f"batch_size={batch_size}, grad_accum={grad_accum}, beta={beta}, "
             f"save_strategy={save_strategy}"
         )
@@ -971,7 +1045,7 @@ class ToolTrainer:
         _last_temp_ckpt = None  # tracks the rolling temporary checkpoint
 
         try:
-            for step in range(max_steps):
+            for step in range(start_step, max_steps):
                 # ---- generate data ----
                 samples = generator.generate_batch(batch_size)
                 chosen_inputs, rejected_inputs, prompt_lengths = (
