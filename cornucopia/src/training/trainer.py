@@ -814,6 +814,22 @@ class ToolTrainer:
                 pass
         return 0
 
+    def _vlm_resume_checkpoint_in_output_dir(
+        self, resume_from_checkpoint: Optional[str]
+    ) -> bool:
+        """True if *resume* lives under ``self.output_dir`` (same run / natural folder)."""
+        if not resume_from_checkpoint:
+            return False
+        ckpt = Path(resume_from_checkpoint).expanduser().resolve()
+        out = self.output_dir.resolve()
+        if not ckpt.is_dir():
+            return False
+        try:
+            ckpt.relative_to(out)
+            return True
+        except ValueError:
+            return False
+
     def _load_vlm_peft_adapter_from_path(self, checkpoint_dir: Path) -> None:
         """Load LoRA adapter tensors from a PEFT checkpoint into the current VLM."""
         checkpoint_dir = Path(checkpoint_dir).expanduser().resolve()
@@ -991,15 +1007,34 @@ class ToolTrainer:
             )
 
         start_step = 0
+        resume_same_run = self._vlm_resume_checkpoint_in_output_dir(
+            resume_from_checkpoint
+        )
         if resume_from_checkpoint:
             self._load_vlm_peft_adapter_from_path(Path(resume_from_checkpoint))
-            start_step = self._parse_vlm_dpo_checkpoint_step(resume_from_checkpoint)
-            if start_step > 0:
-                logger.info(
-                    f"Resuming VLM DPO from loop step {start_step} "
-                    f"({start_step // grad_accum} optimizer/scheduler steps so far); "
-                    "adapter weights restored, optimizer state fresh"
+            if resume_same_run:
+                start_step = self._parse_vlm_dpo_checkpoint_step(
+                    resume_from_checkpoint
                 )
+                if start_step > 0:
+                    logger.info(
+                        f"Resuming VLM DPO in {self.output_dir.resolve()}: "
+                        f"continuing from loop step {start_step} "
+                        f"({start_step // grad_accum} optimizer steps so far); "
+                        "optimizer state still fresh (not saved in checkpoints)"
+                    )
+            else:
+                parsed = self._parse_vlm_dpo_checkpoint_step(
+                    resume_from_checkpoint
+                )
+                if parsed > 0:
+                    logger.info(
+                        "Warm-start: loaded adapter from another directory "
+                        f"({Path(resume_from_checkpoint).resolve()}); "
+                        f"ignoring checkpoint step {parsed} — "
+                        f"this run's steps and LR schedule start at 0 under "
+                        f"{self.output_dir.resolve()}"
+                    )
 
         # Optimizer (after optional adapter load so it tracks final tensors)
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
@@ -1098,27 +1133,28 @@ class ToolTrainer:
                     scheduler.step()
                     optimizer.zero_grad()
 
-                # ---- logging ----
-                if (step + 1) % logging_steps == 0:
-                    reward_margin = (pi_diff - ref_diff).mean().item()
-                    accuracy = ((pi_diff - ref_diff) > 0).float().mean().item()
-                    logger.info(
-                        f"Step {step+1}/{max_steps} | loss={loss.item():.4f} "
-                        f"reward_margin={reward_margin:.4f} acc={accuracy:.2%}"
+                # ---- logging (console + trace every batch; TB throttled) ----
+                reward_margin = (pi_diff - ref_diff).mean().item()
+                accuracy = ((pi_diff - ref_diff) > 0).float().mean().item()
+                logger.info(
+                    f"Step {step+1}/{max_steps} | loss={loss.item():.4f} "
+                    f"reward_margin={reward_margin:.4f} acc={accuracy:.2%}"
+                )
+                trace_file.write(
+                    json.dumps({
+                        "step": step + 1,
+                        "loss": loss.item(),
+                        "reward_margin": reward_margin,
+                        "accuracy": accuracy,
+                    }) + "\n"
+                )
+                trace_file.flush()
+                if self.writer and (step + 1) % logging_steps == 0:
+                    self.writer.add_scalar("dpo/loss", loss.item(), step + 1)
+                    self.writer.add_scalar(
+                        "dpo/reward_margin", reward_margin, step + 1
                     )
-                    trace_file.write(
-                        json.dumps({
-                            "step": step + 1,
-                            "loss": loss.item(),
-                            "reward_margin": reward_margin,
-                            "accuracy": accuracy,
-                        }) + "\n"
-                    )
-                    trace_file.flush()
-                    if self.writer:
-                        self.writer.add_scalar("dpo/loss", loss.item(), step + 1)
-                        self.writer.add_scalar("dpo/reward_margin", reward_margin, step + 1)
-                        self.writer.add_scalar("dpo/accuracy", accuracy, step + 1)
+                    self.writer.add_scalar("dpo/accuracy", accuracy, step + 1)
 
                 # ---- checkpointing ----
                 should_save, is_permanent = should_save_checkpoint(
